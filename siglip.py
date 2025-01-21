@@ -40,6 +40,7 @@ class SiglipImageEmbeddingLayer(nn.Module):
         self.image_size = config.image_size
         self.patch_size = config.patch_size
 
+        # conv layer to break down image into (patch_size, patch_size) sized patches 
         self.patch_embedding_conv = nn.Conv2d(
             in_channels=config.num_channels,
             out_channels=config.embed_dim,
