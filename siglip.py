@@ -57,7 +57,67 @@ class SiglipImageEmbeddingLayer(nn.Module):
             persistent=False,      # not saved in the model state dict 
         )
 
+    def forward(self, pixels: torch.FloatTensor) -> torch.Tensor: 
+        _, _, height, width = pixels.shape  # [batch_size, channels, height, width]
 
+        patch_embeds = self.patch_embedding_conv(pixels)    # [batch_size, embed_dim, num_patches_h, num_patches_w]
+
+        # flattens from dim 2 onwards 
+        embeddings = patch_embeds.flatten(2)      # [batch_size, embed_dim, num_patches]; num_patches = num_patches_h * num_patches_w
+        # num_patches_h = height // patch_size, num_patches_w = width // patch_size
+
+        embeddings = embeddings.transpose(1, 2)   # [batch_size, num_patches, embed_dim]
+        
+        # each position encoding is a vector of size embed_dim 
+        embeddings = embeddings + self.position_embedding(self.position_ids)
+
+        return embeddings
+
+class SiglipMLP(nn.Module):
+    def __init__(self, config: SiglipVisionConfig):
+        super().__init__()
+        self.config = config 
+        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
+
+    def forward(self, hidden_states: torch.Tensor):
+        # [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, intermediate_size]
+        hidden_states = self.fc1(hidden_states)
+
+        hidden_states = nn.functional.gelu(hidden_states, approximate='tanh')
+
+        # [batch_size, num_patches, intermediate_size] -> [batch_size, num_patches, embed_dim]
+        hidden_states = self.fc2(hidden_states)
+
+        return hidden_states
+
+class SiglipTransformerEncoderLayer(nn.Module):
+    def __init__(self, config: SiglipVisionConfig):
+        super().__init__()
+        self.embed_dim = config.hidden_size
+        self.attn_layer = SiglipAttention(config)
+        self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+        self.mlp_layer = SiglipMLP(config)
+        self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor: 
+        # residual: [batch_size, num_patches, embed_dim]
+        residual = hidden_states
+        # [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, embed_dim]
+        hidden_states = self.layer_norm1(hidden_states)
+        # [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, embed_dim]
+        hidden_states = self.attn_layer(hidden_states)
+        hidden_states = hidden_states + residual
+
+        residual = hidden_states
+
+        hidden_states = self.layer_norm2(hidden_states)
+        # [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, embed_dim]
+        hidden_states = self.mlp_layer(hidden_states)
+        hidden_states = hidden_states + residual
+
+        return hidden_states
+    
 class SiglipTransformerEncoder(nn.Module):
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
