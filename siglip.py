@@ -109,9 +109,49 @@ class SiglipAttention(nn.Module):
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
 
     def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        
 
+        # hidden states: [batch_size, num_patches, embed_dim]
+        batch_size, seq_len, _ = hidden_states.size()
+        query_states = self.q_proj(hidden_states)
+        key_states = self.k_proj(hidden_states)
+        value_states = self.v_proj(hidden_states)
 
+        # [batch_size, num_heads, num_patches, head_dim]
+        query_states = query_states.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = key_states.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        value_states = value_states.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+        # calculate attention using the formula Q * K^T / sqrt(d_k)
+        # atten_weights: [batch_size, num_heads, num_patches, num_patches]
+        attn_weights = (torch.matmul(query_states, key_states.transpose(2, 3)) * self.scale) 
+
+        if attn_weights.size() != (batch_size, self.num_heads, seq_len, seq_len):
+            raise ValueError(
+                f"Attention weights should be of size {(batch_size, self.num_heads, seq_len, seq_len)}, but is"
+                f" {attn_weights.size()}"
+            )
+
+        # apply the softmax across the row 
+        # [batch_size, num_heads, num_patches, num_patches]
+        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        # apply dropout during training 
+        attn_weights = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
+        # multiply attn_weights by the value states 
+        # [batch_size, num_heads, num_patches, head_dim]
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        if attn_output.size() != (batch_size, self.num_heads, seq_len, self.head_dim):
+            raise ValueError(
+                f"`attn_output` should be of size {(batch_size, self.num_heads, seq_len, self.head_dim)}, but is"
+                f" {attn_output.size()}"
+            )
+
+        # [batch_size, num_heads, num_patches, head_dim] -> [batch_size, num_patches, num_heads, head_dim]
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        # [batch_size, num_patches, num_heads, head_dim] -> [batch_size, num_patches, embed_dim]
+        attn_output = attn_output.reshape(batch_size, seq_len, self.embed_dim)
+
+        return attn_output, attn_weights
 
 class SiglipTransformerEncoderLayer(nn.Module):
     def __init__(self, config: SiglipVisionConfig):
@@ -152,7 +192,7 @@ class SiglipTransformerEncoder(nn.Module):
         # input_embeds: [batch_size, num_patches, embed_dim] -> [batch_size, num_patches, embed_dim]
 
         for layer in self.layers:
-            embeddings = layer(embeddings)
+            embeddings = layer(input_embeds)
 
         return embeddings 
 
