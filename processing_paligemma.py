@@ -7,6 +7,29 @@ IMAGENET_STANDARD_MEAN = [0.5, 0.5, 0.5]
 IMAGENET_STANDARD_STD = [0.5, 0.5, 0.5]
 
 
+def process_images(
+    images: List[Image.Image], 
+    size: Tuple[int, int] = None, 
+    resample: Image.Resampling = None, 
+    rescale_factor: float = None,
+    image_mean: Optional[Union[float, List[float]]] = None,
+    image_std: Optional[Union[float, List[float]]] = None
+):
+    height, weight = size[0], size[1]
+    # resize the image to be of provided dimensions 
+    images = [
+        resize(image=image, size=(height, width), resample=resample) for image in images 
+    ]
+    images = [np.array(image) for image in images]
+    # rescale the image for the values to be in between [0, 1]
+    images = [rescale(image, scale=rescale_factor) for image in images]
+    # normalize the image to be of certain mean and std 
+    images = [normalize(image, mean=image_mean, std=image_std) for image in images]
+    # move channel dimension to be the first: [channel, height, width]
+    images = [image.transpose(2, 0, 1) for image in images]
+    return images 
+
+
 class PaliGemmaProcessor: 
 
     IMAGE_TOKEN = "<image>"
