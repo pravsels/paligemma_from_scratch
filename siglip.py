@@ -150,6 +150,8 @@ class SiglipAttention(nn.Module):
         attn_output = attn_output.transpose(1, 2).contiguous()
         # [batch_size, num_patches, num_heads, head_dim] -> [batch_size, num_patches, embed_dim]
         attn_output = attn_output.reshape(batch_size, seq_len, self.embed_dim)
+        # [batch_size, num_patches, embed_dim]
+        attn_output = self.out_proj(attn_output)
 
         return attn_output, attn_weights
 
