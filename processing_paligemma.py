@@ -7,6 +7,11 @@ import torch
 IMAGENET_STANDARD_MEAN = [0.5, 0.5, 0.5]
 IMAGENET_STANDARD_STD = [0.5, 0.5, 0.5]
 
+def add_image_tokens_to_prompt(prefix_prompt, bos_token, image_seq_len, image_token):
+    # NOTE: from the paper it looks like the `\n` should be tokenized separately, but in the HF implementation this is not done.
+    # ref to HF implementation: https://github.com/huggingface/transformers/blob/7f79a97399bb52aad8460e1da2f36577d5dccfed/src/transformers/models/paligemma/processing_paligemma.py#L55-L73
+    return f"{image_token * image_seq_len}{bos_token}{prefix_prompt}\n"
+
 def resize(
     image: Image.Image,
     size: Tuple[int, int],
@@ -15,7 +20,9 @@ def resize(
 ) -> np.ndarray: 
     height, width = size 
     resized_image = image.resize(
-        (width, height), resample=resample, reducing_gap=reducing_gap
+        (width, height), 
+        resample=resample, 
+        reducing_gap=reducing_gap   # downsize image in steps
     )
     return resized_image
 
@@ -28,6 +35,16 @@ def rescale(
     rescaled_image = rescaled_image.astype(dtype)
     return rescaled_image 
 
+def normalize(
+    image: np.ndarray,
+    mean: Union[float, Iterable[float]],
+    std: Union[float, Iterable[float]],
+) -> np.ndarray: 
+    mean = np.array(mean, dtype=image.dtype)
+    std = np.array(std, dtype=image.dtype)
+    normalized_image = (image - mean) / std 
+    return normalized_image 
+
 def process_images(
     images: List[Image.Image], 
     size: Tuple[int, int] = None, 
@@ -36,7 +53,7 @@ def process_images(
     image_mean: Optional[Union[float, List[float]]] = None,
     image_std: Optional[Union[float, List[float]]] = None
 ) -> List[np.ndarray]:
-    height, weight = size[0], size[1]
+    height, width = size[0], size[1]
     # resize the image to be of provided dimensions 
     images = [
         resize(image=image, size=(height, width), resample=resample) for image in images 
