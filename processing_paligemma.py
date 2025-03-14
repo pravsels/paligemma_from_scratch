@@ -1,5 +1,5 @@
 
-from typing import Dict, List, Optional, Union, Tuple, Iterable 
+from typing import List, Optional, Union, Tuple, Iterable 
 import numpy as np 
 from PIL import Image 
 import torch 
@@ -109,7 +109,7 @@ class PaliGemmaProcessor:
         padding: str = "longest",
         truncation: bool = True,
     ) -> dict:
-        assert len(images) == 1 and len(text) == 1, f"Received {len(images)} images for {len(prompts)} prompts."
+        assert len(images) == 1 and len(prompts) == 1, f"Received {len(images)} images for {len(prompts)} prompts."
 
         pixel_values = process_images(
             images, 
