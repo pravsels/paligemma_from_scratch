@@ -84,7 +84,41 @@ class PaliGemmaForConditionalGeneration(nn.Module):
 
     def tie_weights(self):
         return self.language_model.tie_weights()
-    
+
+    def _merge_input_with_image_embeds(
+        self, image_embeds: torch.Tensor, input_embeds: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor, kv_cache: Optional[KVCache] = None
+    ):
+        _, _, embed_dim = image_embeds.shape 
+        batch_size, sequence_length = input_ids.shape 
+        dtype, device = input_ids.shape 
+        # shape: [batch_size, seq_len, hidden_size]
+        scaled_image_embeds = image_embeds / (self.config.hidden_size**0.5)
+
+        # combine the embeddings of the image tokens, text tokens and padding tokens 
+        # create an embeds of zeros, which will be filled in by the appropriate inputs
+        final_embeds = torch.zeros(batch_size, sequence_length, embed_dim, dtype=input_embeds.dtype, device=input_embeds.device)
+        # create masks that will help us determine which input to fill in where 
+        # shape: [batch_size, seq_len]. mask is true for text tokens 
+        text_mask = (input_ids != self.config.image_token_index) & (input_ids != self.pad_token_id)
+        # shape: [batch_size, seq_len]. mask is true for image tokens 
+        image_mask = input_ids == self.config.image_token_index
+        # shape: [batch_size, seq_len]. mask is true for padding 
+        pad_mask = input_ids == self.pad_token_id
+        
+        # add an extra dimension and then expand/broadcast along it to give embed_dim 
+        # shape: [batch_size, seq_len, embed_dim]
+        text_mask_expanded = text_mask.unsqueeze(-1).expand(-1, -1, embed_dim)
+        image_mask_expanded = image_mask.unsqueeze(-1).expand(-1, -1, embed_dim)
+        pad_mask_expanded = pad_mask.unsqueeze(-1).expand(-1, -1, embed_dim)
+
+        # add in text embeds 
+        final_embeds = torch.where(text_mask_expanded, input_embeds, final_embeds)
+        # add in image embeds. we use masked_scatter since scaled image embeds are a subset of total inputs
+        final_embeds = final_embeds.masked_scatter(image_mask_expanded, scaled_image_embeds)
+        # zero out padding tokens 
+        final_embeds = torch.where(pad_mask_expanded, torch.zeros_like(final_embeds), final_embeds)
+        
+
     def forward(
         self,
         input_ids: torch.LongTensor = None,             # input ids to the LM but with <image> tokens 
@@ -107,7 +141,7 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         image_embeds = self.vit_projection(image_embeds)
 
         # image embeds are embedded in place of the <image> tokens 
-        input_embeds, attention_mask, position_ids = self._merge_input_ids_with_image_features(image_embeds, input_embeds, input_ids, attention_mask, kv_cache)
+        input_embeds, attention_mask, position_ids = self._merge_input_with_image_embeds(image_embeds, input_embeds, input_ids, attention_mask, kv_cache)
 
         outputs = self.language_model(
             attention_mask=attention_mask,
