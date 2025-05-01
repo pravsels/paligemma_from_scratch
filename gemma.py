@@ -47,7 +47,7 @@ class PaliGemmaConfig():
         ignore_index=-100,          # index to ignore in targets when computing loss 
         image_token_index=256000,   # index of the <image> token 
         vocab_size=257152,
-        projection_dim=2048,        # image patches from ViT get projected into 
+        projection_dim=2048,        # image patches from ViT get projected to this dim 
         hidden_size=2048,           # embed dims for input (text and image) to the LM
         pad_token_id=None,
         **kwargs,
@@ -70,7 +70,7 @@ class PaliGemmaConfig():
         self.vision_config.projection_dim = projection_dim
 
 
-class PaliGemmaForConditionalGeneration(nn.Module):
+class PaliGemma(nn.Module):
     def __init__(self, config: PaliGemmaConfig):
         super().__init__()
         self.config = config 
@@ -78,7 +78,7 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         self.vit_projection = PaliGemmaVitProjector(config)
         self.vocab_size = config.vocab_size
 
-        self.language_model = GemmaForCausalLM(config.text_config)
+        self.language_model = Gemma(config.text_config)
 
         self.pad_token_id = self.config.pad_token_id if self.config.pad_token_id is not None else -1 
 
@@ -86,7 +86,12 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         return self.language_model.tie_weights()
 
     def _merge_input_with_image_embeds(
-        self, image_embeds: torch.Tensor, input_embeds: torch.Tensor, input_ids: torch.Tensor, attention_mask: torch.Tensor, kv_cache: Optional[KVCache] = None
+        self, 
+        image_embeds: torch.Tensor, 
+        input_embeds: torch.Tensor, 
+        input_ids: torch.Tensor, 
+        attention_mask: torch.Tensor, 
+        kv_cache: Optional[KVCache] = None
     ):
         _, _, embed_dim = image_embeds.shape 
         batch_size, sequence_length = input_ids.shape 
@@ -95,7 +100,7 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         scaled_image_embeds = image_embeds / (self.config.hidden_size**0.5)
 
         # combine the embeddings of the image tokens, text tokens and padding tokens 
-        # create an embeds of zeros, which will be filled in by the appropriate inputs
+        # create an embeds of zeros, which will be filled in by the appropriate inputs 
         final_embeds = torch.zeros(batch_size, sequence_length, embed_dim, dtype=input_embeds.dtype, device=input_embeds.device)
         # create masks that will help us determine which input to fill in where 
         # shape: [batch_size, seq_len]. mask is true for text tokens 
@@ -111,13 +116,49 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         image_mask_expanded = image_mask.unsqueeze(-1).expand(-1, -1, embed_dim)
         pad_mask_expanded = pad_mask.unsqueeze(-1).expand(-1, -1, embed_dim)
 
-        # add in text embeds 
+        # add in text embeds from input_embeds. remember that they span the full seq_len and 
+        # have <image> tokens as placeholder for image patch embeddings
         final_embeds = torch.where(text_mask_expanded, input_embeds, final_embeds)
         # add in image embeds. we use masked_scatter since scaled image embeds are a subset of total inputs
         final_embeds = final_embeds.masked_scatter(image_mask_expanded, scaled_image_embeds)
         # zero out padding tokens 
         final_embeds = torch.where(pad_mask_expanded, torch.zeros_like(final_embeds), final_embeds)
         
+        # Create Attention Mask 
+        dtype, device = input_embeds.dtype, input_embeds.device 
+        min_dtype = torch.finfo(dtype).min    # most negative float representable 
+        q_len = input_embeds.shape[1]
+
+        if kv_cache is None or kv_cache.num_items() == 0: 
+            # fill the mask with 0, which means no masking since we're in the prefill phase 
+            # Note: this only works when we have no padding 
+            causal_mask = torch.full(
+                (batch_size, q_len, q_len), fill_value=0, dtype=dtype, device=device
+            )
+        else: 
+            # since we're generating tokens, the query is a single token 
+            # Note: this only works when we have no padding 
+            assert q_len == 1
+            kv_len = kv_cache.num_items() + q_len
+
+            # here too, we don't mask anything, since the query should be able to attend to all previous input
+            # Note: this only works when we have no padding 
+            causal_mask = torch.full(
+                (batch_size, q_len, kv_len), fill_value=0, dtype=dtype, device=device
+            )
+        
+        # add the head dimension 
+        # [batch_size, q_len, kv_len] -> [batch_size, num_heads_q, q_len, kv_len]
+        causal_mask = causal_mask.unsqueeze(1)
+        
+        if kv_cache is not None and kv_cache.num_items() > 0: 
+            # query is the last token 
+            position_ids = attention_mask.cumsum(-1)[:, -1]
+        else: 
+            # for masked tokens, we use 1 as position 
+            position_ids = (attention_mask.cumsum(-1)).masked_fill((attention_mask==0), 1).to(device)
+
+        return final_embeds, causal_mask, position_ids
 
     def forward(
         self,
@@ -141,7 +182,11 @@ class PaliGemmaForConditionalGeneration(nn.Module):
         image_embeds = self.vit_projection(image_embeds)
 
         # image embeds are embedded in place of the <image> tokens 
-        input_embeds, attention_mask, position_ids = self._merge_input_with_image_embeds(image_embeds, input_embeds, input_ids, attention_mask, kv_cache)
+        input_embeds, attention_mask, position_ids = self._merge_input_with_image_embeds(image_embeds, 
+                                                                                         input_embeds, 
+                                                                                         input_ids, 
+                                                                                         attention_mask, 
+                                                                                         kv_cache)
 
         outputs = self.language_model(
             attention_mask=attention_mask,
